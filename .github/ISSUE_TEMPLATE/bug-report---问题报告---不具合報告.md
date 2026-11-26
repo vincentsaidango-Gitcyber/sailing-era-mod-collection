@@ -28,11 +28,13 @@ Please select the mods you have enabled.
 - [ ] Ship Selector / 造船船型选择 / 造船時の船種選択
 - [ ] Pickup Range / 扩大拾取范围 / 戦利品の回収範囲拡大
 - [ ] Owned Cabin Blueprints / 船舱改造图纸已拥有标记 / 船室の設計図の所持済み表示
+- [ ] Sailing Pause / 航行暂停 / 航行中の一時停止
 
 ### 3. Mod Settings / Mod 数值设置 / Mod の設定値
 
 - Fixed morale / 固定士气 / 士気固定値：
 - Pickup range multiplier / 拾取距离倍率 / 回収範囲の倍率：
+- Sailing pause hotkey / 航行暂停快捷键 / 航行中の一時停止キー：
 
 ### 4. Description / 问题描述 / 不具合の内容
 
