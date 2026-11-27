@@ -1,0 +1,101 @@
+name: Windows installer smoke test (synthetic game)
+on:
+  push:
+    branches: ['qa/windows-clean-install']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - name: Test published v1.0.6 using Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          if (Get-Command dotnet -ErrorAction SilentlyContinue) { throw 'dotnet unexpectedly on PATH' }
+          $base=Join-Path $env:RUNNER_TEMP ('se-smoke-'+[Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $base | Out-Null
+          $zip=Join-Path $base 'release.zip'
+          [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/vincentsaidango-Gitcyber/sailing-era-mod-collection/releases/download/v1.0.6/SailingEra_ModCollection_v1.0.6.zip' -OutFile $zip -TimeoutSec 120
+          if ((Get-FileHash $zip).Hash -ne 'b0946729f2e34995a28b13dfea290ee5f3dd865a49a730ea7a0a33325eca1804') { throw 'Unexpected release hash' }
+          Expand-Archive -LiteralPath $zip -DestinationPath $base
+          $package=Join-Path $base 'SailingEraModCollection'
+          . (Join-Path $package 'Core.ps1')
+          function Assert($condition,[string]$message) { if (-not $condition) { throw $message }; Write-Host "PASS: $message" }
+          function Invoke-TestApply([string]$root,$settings,[bool]$remove,[string]$answer) {
+            $shared=[hashtable]::Synchronized(@{Stage=0;Detail='';Prompt='';Answer='';VersionAnswer='';VersionCancelled=$false;LoaderInstalled=$false})
+            $worker=[PowerShell]::Create()
+            try {
+              [void]$worker.AddScript({
+                param($package,$root,$settings,$remove,$shared)
+                $ErrorActionPreference='Stop'
+                . (Join-Path $package 'Core.ps1')
+                $script:progressState=$shared
+                ApplySettings $root $settings $remove
+              }).AddArgument($package).AddArgument($root).AddArgument($settings).AddArgument($remove).AddArgument($shared)
+              $pending=$worker.BeginInvoke()
+              $clock=[Diagnostics.Stopwatch]::StartNew()
+              $last=''
+              while (-not $pending.IsCompleted) {
+                if ($clock.Elapsed.TotalMinutes -gt 4) { $worker.Stop(); throw 'Worker timed out' }
+                if ($shared.Prompt -eq 'gameVersion') { $shared.VersionAnswer=$answer }
+                if ($shared.Prompt -eq 'loader') { $shared.Answer='No' }
+                $stage="$($shared.Stage) $($shared.Detail)"
+                if ($stage -ne $last) { Write-Host "Stage: $stage"; $last=$stage }
+                Start-Sleep -Milliseconds 100
+              }
+              $null=$worker.EndInvoke($pending)
+              if ($worker.HadErrors) { throw ($worker.Streams.Error | Out-String) }
+              return $shared
+            } finally { $worker.Dispose() }
+          }
+          $root=Join-Path $base 'synthetic game'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          Assert (-not (TestGameFolder $root)) 'Empty folder rejected'
+          $s=GetState $root
+          $rejected=$false
+          try { $null=ApplySettings $root $s $false } catch { $rejected=$true; Write-Host $_ }
+          Assert $rejected 'Apply rejects empty folder'
+          Assert (@(Get-ChildItem $root -Force).Count -eq 0) 'Rejected folder stays empty'
+          $meta=Join-Path $root 'SailingEra_Data\il2cpp_data\Metadata'
+          New-Item -ItemType Directory -Path $meta -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $root 'SailingEra.exe') -Value 'synthetic fixture, not executable'
+          Set-Content -LiteralPath (Join-Path $root 'GameAssembly.dll') -Value 'synthetic fixture, not a DLL'
+          Set-Content -LiteralPath (Join-Path $meta 'global-metadata.dat') -Value 'synthetic fixture'
+          Assert (TestGameFolder $root) 'Synthetic folder recognized structurally (not a real game)'
+          Assert (-not (Test-Path (Join-Path $root 'BepInEx'))) 'No BepInEx in test directory before installation'
+          $cancel=Invoke-TestApply $root $s $false 'No'
+          Assert $cancel.VersionCancelled 'Unverified version cancellation'
+          Assert (-not (Test-Path (Join-Path $root 'BepInEx'))) 'Cancellation leaves loader absent'
+          $s=GetState $root
+          foreach ($entry in $script:manifest.files) { $s[$entry.mod]=$true }
+          $s.Morale=123
+          $s.Range=3
+          $result=Invoke-TestApply $root $s $false 'Yes'
+          Assert $result.LoaderInstalled 'Official loader downloaded and installed'
+          foreach ($p in @('BepInEx\core\BepInEx.Unity.IL2CPP.dll','winhttp.dll','doorstop_config.ini','dotnet\coreclr.dll','SailingEraModCollection\Manage.cmd','SailingEraModCollection\settings.json')) {
+            Assert (Test-Path -LiteralPath (Join-Path $root $p) -PathType Leaf) "Installed $p"
+          }
+          $identity=GameBuildIdentity $root
+          foreach ($entry in $script:manifest.files) {
+            $p=Join-Path $root ('BepInEx\plugins\'+$entry.path)
+            Assert (Test-Path -LiteralPath $p -PathType Leaf) "Installed $($entry.path)"
+            Assert (IsKnown $entry $p) "Recognized payload $($entry.path)"
+            if ($entry.gameHashProfile) {
+              $actual=ExpectedGameHash $entry ([IO.File]::ReadAllBytes($p))
+              $expected=if ($entry.gameHashProfile.mode -eq 'native') { $script:manifest.gameSha256 } else { $identity.Game }
+              Assert ($actual -ceq $expected) "Expected authorization guard $($entry.mod)"
+            }
+          }
+          $saved=GetState $root
+          Assert ($saved.Morale -eq 123 -and $saved.Range -eq 3) 'Saved custom settings recovered'
+          $null=Invoke-TestApply $root $s $true 'No'
+          foreach ($entry in $script:manifest.files) {
+            Assert (-not (Test-Path (Join-Path $root ('BepInEx\plugins\'+$entry.path)))) "Removed $($entry.path)"
+          }
+          Assert (Test-Path (Join-Path $root 'winhttp.dll')) 'Uninstall preserves loader'
+          Write-Host 'SMOKE TEST COMPLETE: file installation only; no actual game, GUI or game launch tested.'
