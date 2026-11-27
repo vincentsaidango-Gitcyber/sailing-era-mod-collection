@@ -53,7 +53,12 @@ jobs:
               return $shared
             } finally { $worker.Dispose() }
           }
-          $root=Join-Path $base 'synthetic game'
+          foreach ($scriptFile in @(Get-ChildItem -LiteralPath $package -Filter '*.ps1' -Recurse)) {
+            $tokens=$null; $parseErrors=$null
+            $null=[System.Management.Automation.Language.Parser]::ParseFile($scriptFile.FullName,[ref]$tokens,[ref]$parseErrors)
+            Assert ($parseErrors.Count -eq 0) "Windows PowerShell parses $($scriptFile.Name)"
+          }
+          $root=Join-Path $base ('Sailing Era '+[char]0x6E2C+[char]0x8A66)
           New-Item -ItemType Directory -Path $root | Out-Null
           Assert (-not (TestGameFolder $root)) 'Empty folder rejected'
           $s=GetState $root
@@ -68,6 +73,22 @@ jobs:
           Set-Content -LiteralPath (Join-Path $meta 'global-metadata.dat') -Value 'synthetic fixture'
           Assert (TestGameFolder $root) 'Synthetic folder recognized structurally (not a real game)'
           Assert (-not (Test-Path (Join-Path $root 'BepInEx'))) 'No BepInEx in test directory before installation'
+          $s=GetState $root
+          foreach ($key in @('CtrlTap','PickupRange','OwnedBlueprints','SailPause','ShipAttributeRepair','BalancedCrew')) { Assert $s[$key] "Fresh default ON: $key" }
+          foreach ($key in @('Morale999','ShipSelector','CommerceCapacity')) { Assert (-not $s[$key]) "Fresh default OFF: $key" }
+          RememberGameFolder $root
+          Assert ((FindGame) -eq $root) 'Remembered game directory rediscovered'
+          RememberGameFolder (Join-Path $base 'not a game')
+          Assert ((FindGame) -eq $root) 'Invalid directory cannot overwrite remembered valid directory'
+          Assert (@(FindGameCandidates $root) -contains $root) 'Explicit valid candidate rediscovered'
+          # Limit the real disk traversal function to this temporary test tree.
+          & {
+            function LocalGameDrives { $base }
+            $scan=[hashtable]::Synchronized(@{Cancel=$false;Count=0;Current=''})
+            Assert (@(SearchGameDisks $scan) -contains $root) 'Disk traversal finds non-Steam directory with spaces and Unicode'
+            $scan.Cancel=$true
+            Assert (@(SearchGameDisks $scan).Count -eq 0) 'Pre-cancelled disk scan exits without results'
+          }
           $cancel=Invoke-TestApply $root $s $false 'No'
           Assert $cancel.VersionCancelled 'Unverified version cancellation'
           Assert (-not (Test-Path (Join-Path $root 'BepInEx'))) 'Cancellation leaves loader absent'
